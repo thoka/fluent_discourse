@@ -1,3 +1,4 @@
+from typing import Any
 import requests
 from json.decoder import JSONDecodeError
 from .errors import *
@@ -8,11 +9,78 @@ from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+logger.addHandler(logging.StreamHandler())
+logger.setLevel(logging.INFO)
 
+class DiscourseApiPath:
+    def __init__(self, discourse, path):
+        self.discourse = discourse
+        self._path = path
+
+    def _(self, name):
+        # Add name to path
+        return DiscourseApiPath(
+            self.discourse,
+            self._path + [str(name)],
+        )
+    
+    def get(self, data=None):
+        # Make a get request
+        url = self._make_url()
+        return self.discourse._request("GET", url, params=data)
+
+    def post(self, data=None):
+        # Make a post request
+        url = self._make_url()
+        return self.discourse._request("POST", url, data=data)
+
+    def put(self, data=None):
+        # Make a put request
+        url = self._make_url()
+        return self.discourse._request("PUT", url, data=data)
+
+    def delete(self, data=None):
+        # Make a delete request
+        url = self._make_url()
+        return self.discourse._request("DELETE", url, data=data)
+
+    def _make_url(self):
+        # Build the request url from cache segments
+        endpoint = "/".join(self._path)
+        # strip forward slash from e.g. '.json' or '.rss' segments if passed
+        endpoint = endpoint.replace("/.", ".")
+
+        url = f"{self.discourse._base_url}/{endpoint}"
+        return url
+
+    def __getattr__(self, name):
+        """
+        Calling self.attribute_name adds "attribute_name" to self._cache
+
+        Only works for strings
+        """
+        if name == "json":
+            return self._(f".{name}")
+        return self._(name)
+
+    def __getitem__(self, name):
+        """
+        Calling self[attribute_name] adds "attribute_name" to self._cache
+
+        Primarily for integers
+        """
+        return self._(name)
+
+class Cache:
+    def __init__(self):
+        self.groups = {}
+        self.categories = {}
+        self.users = {}
 
 class Discourse:
     def __init__(
-        self, base_url, username, api_key, cache=None, raise_for_rate_limit=True
+        self, base_url, username, api_key, #path=None, 
+        raise_for_rate_limit=True, debug=False, timeout= 10
     ):
         if base_url[-1] == "/":
             # Remove trailing slash from base_url
@@ -20,13 +88,17 @@ class Discourse:
         self._base_url = base_url
         self._username = username
         self._api_key = api_key
-        self._cache = cache or []
+        # self._cache = path or []
         self._raise_for_rate_limit = raise_for_rate_limit
         self._headers = {
             "Content-Type": "application/json",
             "Api-Username": self._username,
             "Api-Key": self._api_key,
         }
+        self._debug = debug
+        self._timout = timeout
+        self.cache = Cache()
+
 
     @staticmethod
     def from_env(raise_for_rate_limit=True):
@@ -39,18 +111,26 @@ class Discourse:
 
     def _(self, name):
         # Add name to cache, return self
-        return Discourse(
-            self._base_url,
-            self._username,
-            self._api_key,
-            self._cache + [str(name)],
-            self._raise_for_rate_limit,
+        return DiscourseApiPath(
+            self,
+            [str(name)],
         )
 
     def _request(self, method, url, data=None, params=None):
+        if self._debug:
+            print("--- REUEST ---")
+            print(method, url)
+            print("DATA:", data, "PARAMS:", params)
+
         r = requests.request(
-            method, url, json=data, params=params, headers=self._headers
+            method, url, json=data, params=params, headers=self._headers, timeout=self._timout
         )
+
+        if self._debug:
+            print("--- RESPONSE ---")   
+            print(r.status_code)
+            print(r.text)        
+            print("~~~~~~~~~~~~~~")
 
         if r.status_code == 200:
             try:
@@ -62,7 +142,6 @@ class Discourse:
             return self._handle_error(r, method, url, data, params)
 
     def _handle_error(self, response, method, url, data, params):
-        self._cache = []
         if response.status_code == 404:
             raise PageNotFoundError(
                 f"The requested page was not found, or you do not have permission to access it: {response.url}"
@@ -91,39 +170,6 @@ class Discourse:
         time.sleep(wait_seconds)
         return
 
-    def get(self, data=None):
-        # Make a get request
-        url = self._make_url()
-        self._cache = []
-        return self._request("GET", url, params=data)
-
-    def post(self, data=None):
-        # Make a post request
-        url = self._make_url()
-        self._cache = []
-        return self._request("POST", url, data=data)
-
-    def put(self, data=None):
-        # Make a put request
-        url = self._make_url()
-        self._cache = []
-        return self._request("PUT", url, data=data)
-
-    def delete(self, data=None):
-        # Make a delete request
-        url = self._make_url()
-        self._cache = []
-        return self._request("DELETE", url, data=data)
-
-    def _make_url(self):
-        # Build the request url from cache segments
-        endpoint = "/".join(self._cache)
-        # strip forward slash from e.g. '.json' or '.rss' segments if passed
-        endpoint = endpoint.replace("/.", ".")
-
-        url = f"{self._base_url}/{endpoint}"
-        return url
-
     def __getattr__(self, name):
         """
         Calling self.attribute_name adds "attribute_name" to self._cache
@@ -141,3 +187,8 @@ class Discourse:
         Primarily for integers
         """
         return self._(name)
+    
+
+    def __setattr__(self, __name: str, __value: Any) -> None:
+
+        self.__dict__[__name] = __value
