@@ -250,7 +250,7 @@ RESP:{r.status_code}
         except:
             wait_seconds = 10
         # add piece to rate limit and then try again
-        logger.warning(
+        logger.debug(
             f"Discourse rate limit hit, trying again in {wait_seconds} seconds"
         )
         # sleep for wait_seconds
