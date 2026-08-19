@@ -13,6 +13,11 @@ logger.addHandler(logging.NullHandler())
 logger.addHandler(logging.StreamHandler())
 logger.setLevel(logging.INFO)
 
+# Transient server-side errors: retried with exponential backoff instead of
+# failing the whole run. 500 is deliberately excluded - it usually signals a
+# genuine application error on the Discourse side, not a temporary condition.
+RETRYABLE_STATUS_CODES = {502, 503, 504}
+
 class DiscourseApiPath:
     def __init__(self, discourse, path, logger=logger):
         self.discourse = discourse
@@ -138,8 +143,9 @@ class Cache:
 
 class Discourse:
     def __init__(
-        self, base_url, username, api_key, #path=None, 
-        raise_for_rate_limit=True, debug=False, timeout= 10
+        self, base_url, username, api_key, #path=None,
+        raise_for_rate_limit=True, debug=False, timeout= 10,
+        max_retries=5, retry_backoff_base=1, retry_backoff_max=60,
     ):
         if base_url[-1] == "/":
             # Remove trailing slash from base_url
@@ -156,6 +162,9 @@ class Discourse:
         }
         self._debug = debug
         self._timout = timeout
+        self._max_retries = max_retries
+        self._retry_backoff_base = retry_backoff_base
+        self._retry_backoff_max = retry_backoff_max
         self.cache = Cache()
         self.domain = base_url.split("//")[-1].split("/")[0]
 
@@ -175,7 +184,7 @@ class Discourse:
             [str(name)],
         )
 
-    def _request(self, method, url, data=None, params=None):
+    def _request(self, method, url, data=None, params=None, attempt=0):
 
         r = requests.request(
             method, url, json=data, params=params, headers=self._headers, timeout=self._timout
@@ -185,7 +194,7 @@ class Discourse:
 DATA:{data}
 RESP:{r.status_code}
 {r.text}""")
-        
+
         # print(info)
         #TODO log info
 
@@ -196,9 +205,9 @@ RESP:{r.status_code}
                 # Request succeeded but response body was not valid JSON
                 return r.text
         else:
-            return self._handle_error(r, method, url, data, params)
+            return self._handle_error(r, method, url, data, params, attempt)
 
-    def _handle_error(self, response, method, url, data, params):
+    def _handle_error(self, response, method, url, data, params, attempt=0):
         if response.status_code == 404:
            raise PageNotFoundError(
                 f"The requested page was not found, or you do not have permission to access it: {response.url}"
@@ -210,11 +219,29 @@ RESP:{r.status_code}
                 raise RateLimitError("Rate limit hit")
             else:
                 self._wait_for_rate_limit(response, method, url, data, params)
-                return self._request(method, url, data, params)
+                return self._request(method, url, data, params, attempt)
+        elif response.status_code in RETRYABLE_STATUS_CODES:
+            if attempt >= self._max_retries:
+                raise DiscourseError(
+                    f"Discourse server error persisted after {attempt} retries: "
+                    f"{response.status_code} - {response.text}"
+                )
+            self._wait_for_retryable_error(response, attempt)
+            return self._request(method, url, data, params, attempt + 1)
         else:
                 raise DiscourseError(
                 f"Unhandled discourse exception: {response.status_code} - {response.text}"
             )
+
+    def _wait_for_retryable_error(self, response, attempt):
+        wait_seconds = min(
+            self._retry_backoff_base * (2 ** attempt), self._retry_backoff_max
+        )
+        logger.warning(
+            f"Discourse server error {response.status_code}, retrying in "
+            f"{wait_seconds}s (attempt {attempt + 1}/{self._max_retries})"
+        )
+        time.sleep(wait_seconds)
 
     def _wait_for_rate_limit(self, response, method, url, data, params):
         # get the number of seconds to wait before retrying, add 1 for 0 errors

@@ -2,6 +2,8 @@ from conf_tests import BASE_URL, client, USERNAME, API_KEY
 from fluent_discourse import *
 import pytest
 import json
+import requests
+import time
 
 
 def test_accumulate_strings(client):
@@ -72,3 +74,44 @@ def test_wait_for_rate_limit():
     MockResponse.status_code = 429
     client = Discourse.from_env(raise_for_rate_limit=False)
     client._wait_for_rate_limit(MockResponse, "GET", None, None, None)
+
+
+def test_retryable_error_retries_then_succeeds(client, monkeypatch):
+    MockResponse.status_code = 503
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
+
+    calls = {"n": 0}
+
+    class SuccessResponse:
+        status_code = 200
+        text = '{"ok": true}'
+
+        @classmethod
+        def json(cls):
+            return {"ok": True}
+
+    def fake_request(method, url, json=None, params=None, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return MockResponse
+        return SuccessResponse
+
+    monkeypatch.setattr(requests, "request", fake_request)
+
+    result = client._request("GET", BASE_URL)
+
+    assert result == {"ok": True}
+    assert calls["n"] == 3
+    assert sleeps == [1, 2]
+
+
+def test_retryable_error_exhausts_retries(client, monkeypatch):
+    MockResponse.status_code = 503
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        requests, "request", lambda *a, **kw: MockResponse
+    )
+
+    with pytest.raises(DiscourseError):
+        client._request("GET", BASE_URL)
