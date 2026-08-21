@@ -135,12 +135,6 @@ class DiscourseApiPath:
         """
         return self._(name)
 
-class Cache:
-    def __init__(self):
-        self.groups = {}
-        self.categories = {}
-        self.users = {}
-
 class Discourse:
     def __init__(
         self, base_url, username, api_key, #path=None,
@@ -165,7 +159,6 @@ class Discourse:
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
         self._retry_backoff_max = retry_backoff_max
-        self.cache = Cache()
         self.domain = base_url.split("//")[-1].split("/")[0]
 
     @staticmethod
