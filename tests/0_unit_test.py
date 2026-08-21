@@ -6,19 +6,67 @@ import requests
 import time
 
 
+# A path is built on a DiscourseApiPath object, not on the client itself:
+# the client stays reusable and a path can be requested more than once.
+
+
 def test_accumulate_strings(client):
     endpoint = client.test.a.path
-    assert endpoint._cache == ["test", "a", "path"]
+    assert endpoint._path == ["test", "a", "path"]
 
 
 def test_accumulate_integers(client):
     endpoint = client.test.a.path[5]
-    assert endpoint._cache == ["test", "a", "path", "5"]
+    assert endpoint._path == ["test", "a", "path", "5"]
 
 
 def test_make_url(client):
-    client._cache = ["this", "is", "a", "test", ".json"]
-    assert client._make_url() == f"{BASE_URL}/this/is/a/test.json"
+    endpoint = client.this["is"].a.test.json
+    assert endpoint._make_url() == f"{BASE_URL}/this/is/a/test.json"
+
+
+def test_json_is_the_default_format(client):
+    "A path without an explicit extension is requested as .json."
+    assert client.groups._make_url() == f"{BASE_URL}/groups.json"
+
+
+def test_explicit_extension_is_left_alone(client):
+    "Any extension other than .json has to be passed as a segment."
+    assert client.latest[".rss"]._make_url() == f"{BASE_URL}/latest.rss"
+
+
+def test_client_is_reusable(client):
+    "Building one path must not affect the next - see upstream issue #1."
+    assert client.test.a.path._path == ["test", "a", "path"]
+    assert client.foo.bar._path == ["foo", "bar"]
+
+
+def test_path_is_reusable(client):
+    "Requesting a path must not consume it."
+    endpoint = client.test.a.path
+    endpoint._make_url()
+    assert endpoint._path == ["test", "a", "path"]
+
+
+def test_timeout_is_passed_to_requests(client, monkeypatch):
+    seen = {}
+
+    class Response:
+        status_code = 200
+        text = "{}"
+
+        @staticmethod
+        def json():
+            return {}
+
+    def fake_request(method, url, json=None, params=None, headers=None, timeout=None):
+        seen["timeout"] = timeout
+        return Response
+
+    monkeypatch.setattr(requests, "request", fake_request)
+    client._request("GET", BASE_URL)
+
+    assert seen["timeout"] == client._timeout
 
 
 def test_format_base_url():
